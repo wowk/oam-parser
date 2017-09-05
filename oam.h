@@ -1,29 +1,11 @@
 #ifndef OAM_H
 #define OAM_H
 
+#include "oamdefs.h"
 #include <stdlib.h>
 #include <stdint.h>
 #include <sys/queue.h>
 #include <linux/if_ether.h>
-
-typedef enum {
-    OamOpInfo                   = 0x00,
-    OamOpEventNotification      = 0x01,
-    OamOpVarRequest             = 0x02,
-    OamOpVarResponse            = 0x03,
-    OamOpLookback               = 0x04,
-    OamLegacyOpVendeorExt       = 0x80,
-    OamLegacyOpPingRequest      = 0x8B,
-    OamLegacyOpPingResponse     = 0x8C,
-    OamOpVendorOui              = 0xfe
-} oam_opcode_e;
-
-typedef enum {
-    OamTlvNull          = 0x00,
-    OamTlvLocalInfo     = 0x01,
-    OamTlvRemoteInfo    = 0x02,
-    OamTlvOrgSpec       = 0xfe
-} oam_tlv_type_e;
 
 typedef struct tlv_t {
     uint8_t type;
@@ -72,72 +54,59 @@ typedef struct {
 } __attribute__((packed)) oam_pdu_t;
 
 typedef struct {
-    STAILQ_HEAD(, tlv_elem_t) tlvs;
-} oam_pdu_info_t;
-
-typedef struct {
     uint16_t sequence;
     STAILQ_HEAD(, tlv_elem_t) tlvs;
 } oam_pdu_event_t;
 
-typedef struct req_item_t {
+typedef struct leaf_t {
     uint8_t branch;
     union {
         uint16_t leaf;
-        STAILQ_HEAD(,tlv_elem_t) tlvs; //branch 6
+        uint16_t type;
     }v;
-} req_item_t;
-
-typedef struct {
-    STAILQ_HEAD(,req_item_t) reqs;
-} oam_pdu_req_t;
-
-typedef struct resp_item_t {
-    uint8_t branch;
-    uint16_t leaf;
     uint8_t width;
     uint8_t value[0];
-} resp_item_t;
+} __attribute__((packed)) leaf_t;
 
-typedef struct {
-    STAILQ_HEAD(,resp_item_t) resps;
-} oam_pdu_resp_t;
-
-
-typedef struct {
-    uint8_t branch;
-    union {
-        uint16_t leaf;
-        STAILQ_HEAD(,tlv_elem_t) tlvs; //for branch 6
-    }v;
-} oam_pdu_teknovus_get_req_t;
+typedef struct leaf_item_t {
+    STAILQ_ENTRY(leaf_item_t) entry;
+    leaf_t leaf;
+}leaf_item_t;
 
 typedef struct {
     uint8_t branch;
-
-} oam_pdu_teknovus_info_t;
-
-typedef struct {
-    uint8_t branch;
-
-} oam_pdu_teknovus_get_resp_t;
-
-typedef struct {
-
-} oam_pdu_teknovus_set_req_t;
-
-typedef struct {
-
-} oam_pdu_teknovus_set_resp_t;
+    uint16_t fw_ver;
+    struct {
+        uint8_t part1;
+        uint16_t part2;
+    }oui;
+    uint16_t product_id;
+    uint16_t version;
+    uint8_t extended_id[64];
+    uint8_t base_mac[6];
+    uint8_t max_links;
+    uint8_t num_ports;
+    uint8_t num_assignable_upstream_queues;
+    uint8_t max_queue_per_link_upstream;
+    uint8_t queue_increment_upstream;
+    uint8_t num_assignable_downstream_queues;
+    uint8_t max_queue_per_link_downstream;
+    uint8_t queue_increment_downstream;
+    uint16_t upstream_buffer_available;
+    uint16_t downstream_buffer_available;
+    uint16_t jedec_manufacturer_id;
+    uint16_t chip_id;
+    uint32_t chip_ver;
+} __attribute__((packed)) oam_pdu_teknovus_info_t;
 
 typedef struct {
     uint32_t oui:24;
-    uint32_t ext_opcode;
+    uint32_t ext_opcode:8;
     union {
-        oam_pdu_teknovus_get_req_t greq;
-        oam_pdu_teknovus_get_resp_t gresp;
-        oam_pdu_teknovus_set_req_t sreq;
-        oam_pdu_teknovus_set_resp_t sresp;
+        STAILQ_HEAD(,leaf_item_t) greq;
+        STAILQ_HEAD(,leaf_item_t) gresp;
+        STAILQ_HEAD(,leaf_item_t) sreq;
+        STAILQ_HEAD(,leaf_item_t) sresp;
         oam_pdu_teknovus_info_t info;
     }v;
 } oam_pdu_org_t;
@@ -156,15 +125,16 @@ typedef struct {
     ethhdr_t    ethhdr;
     oam_pdu_t   pdu;
     union {
-        oam_pdu_info_t info;
+        STAILQ_HEAD(,tlv_elem_t) info;
         oam_pdu_event_t event;
         oam_pdu_org_t org;
-        oam_pdu_req_t req;
-        oam_pdu_resp_t resp;
+        STAILQ_HEAD(,leaf_item_t) req;
+        STAILQ_HEAD(,leaf_item_t) resp;
         oam_pdu_loopback_ctl_t loopback;
     }payload;
 } __attribute__((packed)) oam_frame_t;
 
 extern oam_frame_t* oampdu_parse(oam_frame_t** frame, uint8_t* pkt, size_t len);
+extern void oampdu_free_frame(oam_frame_t** frame);
 
 #endif // OAM_H

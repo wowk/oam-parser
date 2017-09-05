@@ -10,7 +10,7 @@ void pcap_cb(u_char * user, const struct pcap_pkthdr * hdr, const u_char * bytes
     oam_frame_t* frame;
     oampdu_parse(&frame, bytes, hdr->len);
     if( frame ){
-        free(frame);
+        oampdu_free_frame(&frame);
     }
 }
 

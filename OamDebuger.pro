@@ -5,8 +5,9 @@ CONFIG -= qt
 
 LIBS += -lpcap
 
-SOURCES += logmsg.cpp main.c oam.c
+SOURCES += main.c oam.c
 
 
-HEADERS += logmsg.h oam.h
+HEADERS += logmsg.h oam.h \
+    oamdefs.h
 

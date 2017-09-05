@@ -2,16 +2,16 @@
 #define LOGMSG_H
 
 #include <stdio.h>
+#include <stdarg.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#define errmsg(fp, fmt, ...) do{                    \
+    fprintf(fp, "[%s:%d] : ", __func__, __LINE__);  \
+    fprintf(fp, fmt, ##__VA_ARGS__);                \
+    fprintf(fp, "\n");                              \
+    fflush(fp);                                     \
+}while(0)
 
-void errmsg(FILE* fp, const char* fmt, ...);
-void std_errmsg(const char* fmt, ...);
 
-#ifdef __cplusplus
-}
-#endif
+#define std_errmsg(fmt, ...) errmsg(stderr, fmt, ##__VA_ARGS__)
 
 #endif // LOGMSG_H
