@@ -5,26 +5,33 @@
 #include <pcap.h>
 
 
-void pcap_cb(u_char * user, const struct pcap_pkthdr * hdr, const u_char * bytes)
-{
-    oam_frame_t* frame;
-    oampdu_parse(&frame, bytes, hdr->len);
-    if( frame ){
-        oampdu_free_frame(&frame);
-    }
-}
-
 int test(void)
 {
     char errbuf[256] = "";
-    pcap_t* pcap = pcap_open_live("enp12s0", 1500, 1, 20, errbuf);
+    pcap_t* pcap = pcap_open_live("enp12s0", 1500, 1, 0, errbuf);
+
+    pcap_set_promisc(pcap, 1);
 
     if( !pcap ){
         std_errmsg("pcap_open_live failed");
         return -1;
     }
 
-    pcap_loop(pcap, 0, pcap_cb, NULL);
+    while( 1 ){
+        oam_frame_t* frame;
+        struct pcap_pkthdr  hdr;
+        uint8_t* pkt = pcap_next(pcap, &hdr);
+        oampdu_parse(&frame, pkt, hdr.len);
+        if( frame ){
+            char buf[65536] = "";
+            if( frame->pdu.hdr.opcode ){
+                oampdu_dump(frame, buf, sizeof(buf) - 1);
+                printf("%s\n", buf);
+            }
+            oampdu_free_frame(&frame);
+        }
+    }
+    //pcap_loop(pcap, 0, pcap_cb, NULL);
 
     pcap_close(pcap);
 

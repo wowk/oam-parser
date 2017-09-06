@@ -56,6 +56,7 @@ free_tlvs:
     return false;
 }
 
+
 /**
  * @brief oampdu_parse_event
  * @param frame
@@ -119,12 +120,122 @@ bool oampdu_parse_org_teknovus_info(oam_frame_t* frame, uint8_t* pkt, size_t len
     tmp->version    = ntohs(tmp->version);
     tmp->fw_ver     = ntohs(tmp->fw_ver);
     tmp->product_id = ntohs(tmp->product_id);
-
+    tmp->oui.low    = ntohs(tmp->oui.low);
     tmp->jedec_manufacturer_id  = ntohs(tmp->jedec_manufacturer_id);
     tmp->upstream_buffer_available = ntohs(tmp->upstream_buffer_available);
     tmp->downstream_buffer_available = ntohs(tmp->downstream_buffer_available);
 
     return true;
+}
+
+
+static leaf_item_t* get_leaf(uint8_t ext_code, uint8_t* pkt, size_t len, bool* finished)
+{
+
+    leaf_t* pleaf = (leaf_t*)pkt;
+    leaf_item_t* pleafitem;
+    size_t ext_len;
+
+    *finished = false;
+
+    if( len < 3  ){
+
+        finished = true;
+        return NULL;
+
+    }else if( pleaf->branch == OamBranchOrgTekEnd ){
+
+        pleafitem = (leaf_item_t*)calloc(1, sizeof(leaf_item_t));
+        if( !pleafitem ){
+            std_errmsg("malloc(failed) => %s", strerror(errno));
+            return NULL;
+        }
+
+        pleafitem->leaflen = sizeof(leaf_item_t);
+
+        *finished = true;
+
+    }else if( pleaf->branch == OamBranchOrgTekNameBinding ){ //we process NameBinding here beacause of GetRequest
+
+        if( len < 4 ){
+            std_errmsg("invalid pkt");
+            return NULL;
+        }else{
+            ext_len = 4;
+        }
+
+        if( pleaf->width != 0x80 ){
+            ext_len += pleaf->width;
+        }
+
+        if( len < ext_len ){
+            return NULL;
+        }
+
+        pleafitem = (leaf_item_t*)calloc(1, ext_len);
+        if( !pleafitem ){
+            return NULL;
+        }else{
+            pleafitem->leaflen = ext_len;
+            memcpy(&(pleafitem->leaf), pleaf, pleafitem->leaflen);
+        }
+
+    }else if( ext_code == OamOpOrgTekGetRequest ){
+
+        pleafitem = (leaf_item_t*)calloc(1, sizeof( leaf_item_t));
+        if( !pleafitem ){
+            return NULL;
+        }
+
+        pleafitem->leaf.branch = pleaf->branch;
+        pleafitem->leaf.v.leaf = pleaf->v.leaf;
+        pleafitem->leaflen = 3;
+
+    }else{
+        switch (ext_code) {
+        case OamOpOrgTekGetResponse:
+        case OamOpOrgTekSetRequest:
+        case OamOpOrgTekSetResponse:
+            if( len < 4 ){
+                return NULL;
+            }else{
+                ext_len = 4;
+            }
+
+            if( pleaf->width != 0x80 ){
+                ext_len += pleaf->width;
+            }else if( ext_code == OamOpOrgTekSetResponse || ext_code == OamOpOrgTekGetResponse ){
+                if( pleaf->width != 0xA1 ){
+                    ext_len += pleaf->width;
+                }
+            }else{
+                ext_len += pleaf->width;
+            }
+
+            if( len < ext_len ){
+                return NULL;
+            }
+
+            pleafitem = (leaf_item_t*)calloc(1, ext_len);
+            if( !pleafitem ){
+                return NULL;
+            }else{
+                pleafitem->leaflen = ext_len;
+                memcpy(&(pleafitem->leaf), pleaf, pleafitem->leaflen);
+            }
+            break;
+        default:
+            return NULL;
+        }
+    }
+
+    pleafitem->leaf.v.leaf = ntohs(pleafitem->leaf.v.leaf);
+
+    std_errmsg("opcode: %d, branch = %d, leaf = %d",
+               ext_code,
+               pleafitem->leaf.branch,
+               pleafitem->leaf.v.leaf);
+    return pleafitem;
 }
 
 
@@ -137,61 +248,29 @@ bool oampdu_parse_org_teknovus_info(oam_frame_t* frame, uint8_t* pkt, size_t len
  */
 bool oampdu_parse_org_teknovus_get_request(oam_frame_t* frame, uint8_t* pkt, size_t len)
 {
-    bool done = false;
-    leaf_item_t* tmp = NULL;
-    leaf_t* p = NULL;
+    bool finished;
+    leaf_item_t* p;
 
     if( len < 3 ){
-        return false;
+        return true;
     }
 
     STAILQ_INIT(&(frame->payload.org.v.greq));
 
-    while( !done && len >= 3 ){
-
-        p = (leaf_t*)pkt;
-
-        switch( p->branch ){
-        case OamBranchOrgTekEnd:
-        case OamBranchOrgTekObject:
-        case OamBranchOrgTekPackage:
-        case OamBranchOrgTekAttribute:
-        case OamBranchOrgTekAction:
-            tmp = (leaf_item_t*)malloc(sizeof(leaf_item_t));
-            if( !tmp ) goto free_tlvs;
-            tmp->leaf.branch = p->branch;
-            tmp->leaf.v.leaf = ntohs(p->v.leaf);
-            STAILQ_INSERT_TAIL(&(frame->payload.org.v.greq), tmp, entry);
-            pkt += 3;
-            len -= 3;
-            if( p->branch == OamBranchOrgTekEnd ){
-                done = true;
+    while( 1 ){
+        p = get_leaf(OamOpOrgTekGetRequest, pkt, len, &finished);
+        if( finished ){
+            if( p ){
+                STAILQ_INSERT_TAIL(&(frame->payload.org.v.greq), p, entry);
             }
-            std_errmsg("branch= %.2X, leaf= %.4X", p->branch, tmp->leaf.v.leaf);
             break;
-
-        case OamBranchOrgTekNameBinding:
-            std_errmsg("len = %d", len);
-            if( len < 4 ) goto free_tlvs;
-
-            size_t ext_len = (p->width == 0x80 ? 0 : p->width);
-            tmp = (leaf_item_t*)malloc(sizeof(leaf_item_t) + ext_len);
-            if( !tmp ) goto free_tlvs;
-
-            tmp->leaf.branch = p->branch;
-            tmp->leaf.v.leaf = ntohs(p->v.leaf);
-            tmp->leaf.width = p->width;
-            memcpy(tmp->leaf.value, p->value, ext_len);
-            STAILQ_INSERT_TAIL(&(frame->payload.org.v.greq), tmp, entry);
-
-            pkt += 4 + ext_len;
-            len -= 4 + ext_len;
-
-            std_errmsg("branch= %.2X, leaf= %.4X", p->branch, tmp->leaf.v.type);
-            if( p->branch == 0 ) done = true;
-            break;
-        default:
-            goto free_tlvs;
+        }else if( p ){
+            STAILQ_INSERT_TAIL(&(frame->payload.org.v.greq), p, entry);
+            len -= p->leaflen;
+            pkt += p->leaflen;
+        }else{
+            std_errmsg("get leaf failed");
+            return false;
         }
     }
 
@@ -202,6 +281,7 @@ free_tlvs:
 
     return false;
 }
+
 
 /**
  * @brief oampdu_parse_org_teknovus_get_response
@@ -212,71 +292,40 @@ free_tlvs:
  */
 bool oampdu_parse_org_teknovus_get_response(oam_frame_t* frame, uint8_t* pkt, size_t len)
 {
-    bool done = false;
-    leaf_item_t* tmp = NULL;
-    leaf_t* p = NULL;
+    bool finished;
+    leaf_item_t* p;
 
     if( len < 3 ){
-        return false;
+        return true;
     }
 
     STAILQ_INIT(&(frame->payload.org.v.gresp));
 
-    while( !done && len >= 3 ){
-
-        p = (leaf_t*)pkt;
-
-        switch( p->branch ){
-        case OamBranchOrgTekEnd:
-            tmp = (leaf_item_t*)malloc(sizeof(leaf_item_t));
-            if( !tmp ) goto free_tlvs;
-            tmp->leaf.branch = p->branch;
-            tmp->leaf.v.leaf = ntohs(p->v.leaf);
-            STAILQ_INSERT_TAIL(&(frame->payload.org.v.gresp), tmp, entry);
-            pkt += 3;
-            len -= 3;
-            done = true;
-            std_errmsg("branch= %.2X, leaf= %.4X", p->branch, tmp->leaf.v.leaf);
+    while( 1 ){
+        p = get_leaf(OamOpOrgTekGetRequest, pkt, len, &finished);
+        if( finished ){
+            if( p ){
+                STAILQ_INSERT_TAIL(&(frame->payload.org.v.gresp), p, entry);
+            }
             break;
-
-        case OamBranchOrgTekObject:
-        case OamBranchOrgTekPackage:
-        case OamBranchOrgTekAttribute:
-        case OamBranchOrgTekAction:
-        case OamBranchOrgTekNameBinding:
-            std_errmsg("len = %d", len);
-            if( len < 4 ) goto free_tlvs;
-
-            size_t ext_len = (p->width == 0x80 ? 0 : p->width);
-            tmp = (leaf_item_t*)malloc(sizeof(leaf_item_t) + ext_len);
-            if( !tmp ) goto free_tlvs;
-
-            tmp->leaf.branch = p->branch;
-            tmp->leaf.v.leaf = ntohs(p->v.leaf);
-            tmp->leaf.width = p->width;
-            memcpy(tmp->leaf.value, p->value, ext_len);
-            STAILQ_INSERT_TAIL(&(frame->payload.org.v.gresp), tmp, entry);
-
-            pkt += 4 + ext_len;
-            len -= 4 + ext_len;
-
-            std_errmsg("branch= %.2X, leaf= %.4X", p->branch, tmp->leaf.v.type);
-            if( p->branch == 0 ) done = true;
-            break;
-
-        default:
-            std_errmsg("branch ID=%.2X", p->branch);
-            goto free_tlvs;
-            break;
+        }else if( p ){
+            STAILQ_INSERT_TAIL(&(frame->payload.org.v.gresp), p, entry);
+            len -= p->leaflen;
+            pkt += p->leaflen;
+        }else{
+            std_errmsg("get leaf failed");
+            return false;
         }
     }
 
     return true;
 
 free_tlvs:
-    STAILQ_RELEASE(&(frame->payload.org.v.greq), entry);
+    STAILQ_RELEASE(&(frame->payload.org.v.gresp), entry);
+
     return false;
 }
+
 
 /**
  * @brief oampdu_parse_org_teknovus_set_request
@@ -287,62 +336,29 @@ free_tlvs:
  */
 bool oampdu_parse_org_teknovus_set_request(oam_frame_t* frame, uint8_t* pkt, size_t len)
 {
-    bool done = false;
-    leaf_item_t* tmp = NULL;
-    leaf_t* p = NULL;
+    bool finished;
+    leaf_item_t* p;
 
     if( len < 3 ){
-        return false;
+        return true;
     }
 
     STAILQ_INIT(&(frame->payload.org.v.sreq));
 
-    while( !done && len >= 3 ){
-
-        p = (leaf_t*)pkt;
-
-        switch( p->branch ){
-        case OamBranchOrgTekEnd:
-            tmp = (leaf_item_t*)malloc(sizeof(leaf_item_t));
-            if( !tmp ) goto free_tlvs;
-            tmp->leaf.branch = p->branch;
-            tmp->leaf.v.leaf = ntohs(p->v.leaf);
-            STAILQ_INSERT_TAIL(&(frame->payload.org.v.gresp), tmp, entry);
-            pkt += 3;
-            len -= 3;
-            done = true;
-            std_errmsg("branch= %.2X, leaf= %.4X", p->branch, tmp->leaf.v.leaf);
+    while( 1 ){
+        p = get_leaf(OamOpOrgTekGetRequest, pkt, len, &finished);
+        if( finished ){
+            if( p ){
+                STAILQ_INSERT_TAIL(&(frame->payload.org.v.sreq), p, entry);
+            }
             break;
-
-        case OamBranchOrgTekObject:
-        case OamBranchOrgTekPackage:
-        case OamBranchOrgTekAttribute:
-        case OamBranchOrgTekAction:
-        case OamBranchOrgTekNameBinding:
-            std_errmsg("len = %d", len);
-            if( len < 4 ) goto free_tlvs;
-
-            size_t ext_len = (p->width == 0x80 ? 0 : p->width);
-            tmp = (leaf_item_t*)malloc(sizeof(leaf_item_t) + ext_len);
-            if( !tmp ) goto free_tlvs;
-
-            tmp->leaf.branch = p->branch;
-            tmp->leaf.v.leaf = ntohs(p->v.leaf);
-            tmp->leaf.width = p->width;
-            memcpy(tmp->leaf.value, p->value, ext_len);
-            STAILQ_INSERT_TAIL(&(frame->payload.org.v.sreq), tmp, entry);
-
-            pkt += 4 + ext_len;
-            len -= 4 + ext_len;
-
-            std_errmsg("branch= %.2X, leaf= %.4X", p->branch, tmp->leaf.v.type);
-            if( p->branch == 0 ) done = true;
-            break;
-
-        default:
-            std_errmsg("branch ID=%.2X", p->branch);
-            goto free_tlvs;
-            break;
+        }else if( p ){
+            STAILQ_INSERT_TAIL(&(frame->payload.org.v.sreq), p, entry);
+            len -= p->leaflen;
+            pkt += p->leaflen;
+        }else{
+            std_errmsg("get leaf failed");
+            return false;
         }
     }
 
@@ -350,6 +366,7 @@ bool oampdu_parse_org_teknovus_set_request(oam_frame_t* frame, uint8_t* pkt, siz
 
 free_tlvs:
     STAILQ_RELEASE(&(frame->payload.org.v.sreq), entry);
+
     return false;
 }
 
@@ -363,63 +380,29 @@ free_tlvs:
  */
 bool oampdu_parse_org_teknovus_set_response(oam_frame_t* frame, uint8_t* pkt, size_t len)
 {
-    bool done = false;
-    leaf_item_t* tmp = NULL;
-    leaf_t* p = NULL;
+    bool finished;
+    leaf_item_t* p;
 
     if( len < 3 ){
-        return false;
+        return true;
     }
 
     STAILQ_INIT(&(frame->payload.org.v.sresp));
 
-    while( !done && len >= 3 ){
-
-        p = (leaf_t*)pkt;
-
-        switch( p->branch ){
-        case OamBranchOrgTekEnd:
-            tmp = (leaf_item_t*)malloc(sizeof(leaf_item_t));
-            if( !tmp ) goto free_tlvs;
-
-            tmp->leaf.branch = p->branch;
-            tmp->leaf.v.leaf = ntohs(p->v.leaf);
-            STAILQ_INSERT_TAIL(&(frame->payload.org.v.gresp), tmp, entry);
-            pkt += 3;
-            len -= 3;
-            done = true;
-            std_errmsg("branch= %.2X, leaf= %.4X", p->branch, tmp->leaf.v.leaf);
+    while( 1 ){
+        p = get_leaf(OamOpOrgTekGetRequest, pkt, len, &finished);
+        if( finished ){
+            if( p ){
+                STAILQ_INSERT_TAIL(&(frame->payload.org.v.sresp), p, entry);
+            }
             break;
-
-        case OamBranchOrgTekObject:
-        case OamBranchOrgTekPackage:
-        case OamBranchOrgTekAttribute:
-        case OamBranchOrgTekAction:
-        case OamBranchOrgTekNameBinding:
-            std_errmsg("len = %d", len);
-            if( len < 4 ) goto free_tlvs;
-
-            size_t ext_len = ((p->width == 0x80 || p->width == 0xA1) ? 0 : p->width);
-            tmp = (leaf_item_t*)malloc(sizeof(leaf_item_t) + ext_len);
-            if( !tmp ) goto free_tlvs;
-
-            tmp->leaf.branch = p->branch;
-            tmp->leaf.v.leaf = ntohs(p->v.leaf);
-            tmp->leaf.width = p->width;
-            memcpy(tmp->leaf.value, p->value, ext_len);
-            STAILQ_INSERT_TAIL(&(frame->payload.org.v.sresp), tmp, entry);
-
-            pkt += 4 + ext_len;
-            len -= 4 + ext_len;
-
-            std_errmsg("branch= %.2X, leaf= %.4X", p->branch, tmp->leaf.v.type);
-            if( p->branch == 0 ) done = true;
-            break;
-
-        default:
-            std_errmsg("branch ID=%.2X", p->branch);
-            goto free_tlvs;
-            break;
+        }else if( p ){
+            STAILQ_INSERT_TAIL(&(frame->payload.org.v.sresp), p, entry);
+            len -= p->leaflen;
+            pkt += p->leaflen;
+        }else{
+            std_errmsg("get leaf failed");
+            return false;
         }
     }
 
@@ -427,6 +410,7 @@ bool oampdu_parse_org_teknovus_set_response(oam_frame_t* frame, uint8_t* pkt, si
 
 free_tlvs:
     STAILQ_RELEASE(&(frame->payload.org.v.sresp), entry);
+
     return false;
 }
 
@@ -493,7 +477,6 @@ bool oampdu_parse_org_teknovus(oam_frame_t* frame, uint8_t* pkt, size_t len)
  */
 bool oampdu_parse_org(oam_frame_t* frame, uint8_t* pkt, size_t len)
 {
-    //support branch 0/3/4/6/7/9
     oam_pdu_org_t* org = &(frame->payload.org);
 
     memcpy(org, pkt, sizeof(uint32_t));
@@ -509,15 +492,18 @@ bool oampdu_parse_org(oam_frame_t* frame, uint8_t* pkt, size_t len)
     return true;
 }
 
+
 bool oampdu_parse_request(oam_frame_t* frame, uint8_t* pkt, size_t len)
 {
     return true;
 }
 
+
 bool oampdu_parse_response(oam_frame_t* frame, uint8_t* pkt, size_t len)
 {
     return true;
 }
+
 
 bool oampdu_parse_loopback_ctl(oam_frame_t* frame, uint8_t* pkt, size_t len)
 {
@@ -583,6 +569,7 @@ void oampdu_free_frame(oam_frame_t** frame)
     free(p);
 }
 
+
 /**
  * @brief oampdu_parse
  * @param frame
@@ -610,11 +597,12 @@ oam_frame_t *oampdu_parse(oam_frame_t **frame, uint8_t *pkt, size_t len)
         goto free_frame;
     }
     memcpy(&(p->ethhdr), pkt, hlen);
+    p->ethhdr.h_proto = ntohs(p->ethhdr.h_proto);
     pkt += hlen;
     len -= hlen;
 
     //protocol num MUST be 0x8809
-    if( ntohs(p->ethhdr.h_proto) != 0x8809 ){
+    if( p->ethhdr.h_proto != 0x8809 ){
         goto free_frame;
     }
 
@@ -624,6 +612,8 @@ oam_frame_t *oampdu_parse(oam_frame_t **frame, uint8_t *pkt, size_t len)
         goto free_frame;
     }
     memcpy(&((*frame)->pdu), pkt, hlen);
+    *(uint16_t*)&(*frame)->pdu.hdr.flags
+            = ntohs(*(uint16_t*)&(*frame)->pdu.hdr.flags);
     pkt += hlen;
     len -= hlen;
 
@@ -678,7 +668,278 @@ free_frame:
 }
 
 
-void oampdu_dump(const oam_frame_t* frame)
+void oampdu_dump_info(const oam_frame_t* frame, uint8_t* buf, size_t buflen)
 {
+    size_t usedlen = 0;
+    tlv_elem_t* ptlvelem = NULL;
+    STAILQ_FOREACH(ptlvelem, &(frame->payload.info), entry){
+        switch( ptlvelem->tlv.type ){
+        case    0x01:   //local information
+            usedlen += snprintf(buf + usedlen, buflen, "Local Information TLV\n");
+            break;
+        case    0x02:   //remote information
+            usedlen += snprintf(buf + usedlen, buflen, "Remote Information TLV\n");
+            break;
+        case    0xfe:   //vendor information
+            usedlen += snprintf(buf + usedlen, buflen, "Vender Information TLV\n");
+            break;
+        default:
+            usedlen += snprintf(buf + usedlen, buflen, "Not Supported TLV Type\n");
+            break;
+        }
+    }
+}
 
+void oampdu_dump_org_tek_info(const oam_frame_t* frame, uint8_t* buf, size_t buflen)
+{
+    size_t usedlen = 0;
+    uint32_t i, j;
+    uint32_t oui = frame->payload.org.v.info.oui.high;
+    oui = (oui << 16) + frame->payload.org.v.info.oui.low;
+
+    buflen = (buflen - usedlen > 0) ? buflen - usedlen : 0;
+    usedlen += snprintf(buf + usedlen, buflen, "Broadcom OAM Inforamtion:\n");
+
+    buflen = (buflen - usedlen > 0) ? buflen - usedlen : 0;
+    usedlen += snprintf(buf + usedlen, buflen,
+                        "\tFirmware Version-----------------------------: %.2X\n"
+                        "\tOUI------------------------------------------: %.6X\n"
+                        "\tProduct ID-----------------------------------: %.4X\n"
+                        "\tVersion--------------------------------------: %.4X\n",
+                        frame->payload.org.v.info.fw_ver, oui,
+                        frame->payload.org.v.info.product_id,
+                        frame->payload.org.v.info.version);
+
+    buflen = (buflen - usedlen > 0) ? buflen - usedlen : 0;
+    usedlen += snprintf(buf + usedlen, buflen,
+                        "\n\tExtended ID----------------------------------:\n");
+
+    for( i = 0 ; i < sizeof(frame->payload.org.v.info.extended_id) / 16 ; i ++){
+        buflen = (buflen - usedlen > 0) ? buflen - usedlen : 0;
+        usedlen += snprintf(buf + usedlen, buflen,
+                 "\t%.2X %.2X %.2X %.2X %.2X %.2X %.2X %.2X "
+                 "%.2X %.2X %.2X %.2X %.2X %.2X %.2X %.2X\n",
+                frame->payload.org.v.info.extended_id[i*16 + 0x0],
+                frame->payload.org.v.info.extended_id[i*16 + 0x1],
+                frame->payload.org.v.info.extended_id[i*16 + 0x2],
+                frame->payload.org.v.info.extended_id[i*16 + 0x3],
+                frame->payload.org.v.info.extended_id[i*16 + 0x4],
+                frame->payload.org.v.info.extended_id[i*16 + 0x5],
+                frame->payload.org.v.info.extended_id[i*16 + 0x6],
+                frame->payload.org.v.info.extended_id[i*16 + 0x7],
+                frame->payload.org.v.info.extended_id[i*16 + 0x8],
+                frame->payload.org.v.info.extended_id[i*16 + 0x9],
+                frame->payload.org.v.info.extended_id[i*16 + 0xA],
+                frame->payload.org.v.info.extended_id[i*16 + 0xB],
+                frame->payload.org.v.info.extended_id[i*16 + 0xC],
+                frame->payload.org.v.info.extended_id[i*16 + 0xD],
+                frame->payload.org.v.info.extended_id[i*16 + 0xE],
+                frame->payload.org.v.info.extended_id[i*16 + 0xF]);
+    }
+
+    buflen = (buflen - usedlen > 0) ? buflen - usedlen : 0;
+    usedlen += snprintf(buf + usedlen, buflen,
+                        "\n\n\tBase MAC------------: %.2X:%.2X:%.2X:%.2X:%.2X:%.2X\n",
+                        frame->payload.org.v.info.base_mac[0],
+                        frame->payload.org.v.info.base_mac[1],
+                        frame->payload.org.v.info.base_mac[2],
+                        frame->payload.org.v.info.base_mac[3],
+                        frame->payload.org.v.info.base_mac[4],
+                        frame->payload.org.v.info.base_mac[5]);
+
+    buflen = (buflen - usedlen > 0) ? buflen - usedlen : 0;
+    usedlen += snprintf(buf + usedlen, buflen,
+                        "\tMax Links------------------------------------: %d\n"
+                        "\tNum Of Ports---------------------------------: %d\n"
+                        "\tNum Of Assignable UpStream Queues------------: %d\n"
+                        "\tMax Queues of UpStream Link------------------: %d\n"
+                        "\tQueues Increment of UpStream-----------------: %d\n"
+                        "\tNum Of Assignable DownStream Queues----------: %d\n"
+                        "\tMax Queues of DownStream Link----------------: %d\n"
+                        "\tQueues Increment of DownStream---------------: %d\n"
+                        "\tUpStream Buffer Available--------------------: %d\n"
+                        "\tDownStream Buffer Available------------------: %d\n"
+                        "\tJEDEC Manufacturer ID------------------------: %d\n"
+                        "\tChip ID--------------------------------------: %d\n"
+                        "\tChip Version---------------------------------: %d\n",
+                        frame->payload.org.v.info.max_links,
+                        frame->payload.org.v.info.num_ports,
+                        frame->payload.org.v.info.num_assignable_upstream_queues,
+                        frame->payload.org.v.info.max_queue_per_link_upstream,
+                        frame->payload.org.v.info.queue_increment_upstream,
+                        frame->payload.org.v.info.num_assignable_downstream_queues,
+                        frame->payload.org.v.info.max_queue_per_link_downstream,
+                        frame->payload.org.v.info.queue_increment_downstream,
+                        frame->payload.org.v.info.upstream_buffer_available,
+                        frame->payload.org.v.info.downstream_buffer_available,
+                        frame->payload.org.v.info.jedec_manufacturer_id,
+                        frame->payload.org.v.info.chip_id,
+                        frame->payload.org.v.info.chip_ver);
+
+}
+
+
+void oampdu_dump_org_tek_get_request(const oam_frame_t* frame, uint8_t* buf, size_t buflen)
+{
+}
+
+
+void oampdu_dump_org_tek_get_response(const oam_frame_t* frame, uint8_t* buf, size_t buflen){}
+
+
+void oampdu_dump_org_tek_set_request(const oam_frame_t* frame, uint8_t* buf, size_t buflen){}
+
+
+void oampdu_dump_org_tek_set_response(const oam_frame_t *frame, uint8_t *buf, size_t buflen){}
+
+
+void oampdu_dump_org_tek(const oam_frame_t* frame, uint8_t* buf, size_t buflen)
+{
+    switch (frame->payload.org.ext_opcode) {
+    case OamOpOrgTekInfo:
+        oampdu_dump_org_tek_info(frame, buf, buflen);
+        break;
+    case OamOpOrgTekGetRequest:
+        oampdu_dump_org_tek_get_request(frame, buf, buflen);
+        break;
+    case OamOpOrgTekGetResponse:
+        oampdu_dump_org_tek_get_response(frame, buf, buflen);
+        break;
+    case OamOpOrgTekSetRequest:
+        oampdu_dump_org_tek_set_request(frame, buf, buflen);
+        break;
+    case OamOpOrgTekSetResponse:
+        oampdu_dump_org_tek_set_response(frame, buf, buflen);
+        break;
+    default:
+        snprintf(buf, buflen, "Not Supported Vender OpCode: %.2X\n", frame->payload.org.ext_opcode);
+        break;
+    }
+}
+
+
+void oampdu_dump_org(const oam_frame_t* frame, uint8_t* buf, size_t buflen)
+{
+    switch (frame->payload.org.oui) {
+    case OamOUI_BROADCOM:
+        oampdu_dump_org_tek(frame, buf, buflen);
+        break;
+    default:
+        snprintf(buf, buflen, "Not Supported OUI\n");
+        break;
+    }
+}
+
+
+void oampdu_dump_attr_request(const oam_frame_t* frame, uint8_t* buf, size_t buflen)
+{
+    size_t usedlen = 0;
+
+    usedlen += snprintf(buf + usedlen, buflen, "Attribute Request\n");
+}
+
+
+void oampdu_dump_attr_response(const oam_frame_t* frame, uint8_t* buf, size_t buflen)
+{
+    size_t usedlen = 0;
+
+    usedlen += snprintf(buf + usedlen, buflen, "Attribute Response\n");
+}
+
+
+void oampdu_dump_loopback(const oam_frame_t* frame, uint8_t* buf, size_t buflen)
+{
+    size_t usedlen = 0;
+
+    usedlen += snprintf(buf + usedlen, buflen, "Loopback Control Information\n");
+}
+
+
+void oampdu_dump_event(const oam_frame_t* frame, uint8_t* buf, size_t buflen)
+{
+    size_t usedlen = 0;
+
+    usedlen += snprintf(buf + usedlen, buflen, "Event Notification\n");
+}
+
+
+void oampdu_dump(const oam_frame_t* frame, uint8_t* buf, size_t buflen)
+{
+    size_t usedlen;
+
+    usedlen = 0;
+
+    //source & destination MAC
+    buflen = (buflen - usedlen) > 0 ? (buflen - usedlen) : 0;
+    usedlen += snprintf(buf + usedlen, buflen, "%.2x:%.2x:%.2x:%.2x:%.2x:%.2x --> %.2x:%.2x:%.2x:%.2x:%.2x:%.2x\n",
+                        frame->ethhdr.h_source[0], frame->ethhdr.h_source[1], frame->ethhdr.h_source[2],
+                        frame->ethhdr.h_source[3], frame->ethhdr.h_source[4], frame->ethhdr.h_source[5],
+                        frame->ethhdr.h_dest[0], frame->ethhdr.h_dest[1], frame->ethhdr.h_dest[2],
+                        frame->ethhdr.h_dest[3], frame->ethhdr.h_dest[4], frame->ethhdr.h_dest[5]);
+
+    //ether protocol
+    buflen = (buflen - usedlen) > 0 ? (buflen - usedlen) : 0;
+    usedlen += snprintf(buf + usedlen, buflen, "ether proto: %.4X\n", frame->ethhdr.h_proto);
+
+    buflen = (buflen - usedlen) > 0 ? (buflen - usedlen) : 0;
+    usedlen += snprintf(buf + usedlen, buflen, "====================OAM==================\n");
+
+    /**
+    uint16_t link_fault:1;
+    uint16_t dying_gasp:1;
+    uint16_t critical:1;
+    uint16_t local_evaluating:1;          //3
+    uint16_t local_stable:1;              //4
+    uint16_t remove_evaluating:1;         //5
+    uint16_t remote_stable:1;             //6
+    uint16_t _reserved:9;
+    */
+    buflen = (buflen - usedlen) > 0 ? (buflen - usedlen) : 0;
+    usedlen += snprintf(buf + usedlen, buflen, "flags:\n");
+
+    buflen = (buflen - usedlen) > 0 ? (buflen - usedlen) : 0;
+    usedlen += snprintf(buf + usedlen, buflen,
+                        "\tlink fault--------------------%d\n\tdying gasp--------------------%d\n"
+                        "\tcritical----------------------%d\n\tlocal evaluating--------------%d\n"
+                        "\tlocal stable------------------%d\n\tremote evaluating-------------%d\n"
+                        "\tremote stable-----------------%d\n\treserved----------------------%X\n",
+                        frame->pdu.hdr.flags.link_fault, frame->pdu.hdr.flags.dying_gasp,
+                        frame->pdu.hdr.flags.critical, frame->pdu.hdr.flags.local_evaluating,
+                        frame->pdu.hdr.flags.local_stable, frame->pdu.hdr.flags.remove_evaluating,
+                        frame->pdu.hdr.flags.remote_stable, frame->pdu.hdr.flags._reserved);
+
+    buflen = (buflen - usedlen) > 0 ? (buflen - usedlen) : 0;
+    usedlen += snprintf(buf + usedlen, buflen,"opcode: %.2X => %s\n",
+                        frame->pdu.hdr.opcode,
+                        frame->pdu.hdr.opcode == OamOpInfo ? "OAM Information" :
+                        frame->pdu.hdr.opcode == OamOpEventNotification ? "Event Notification" :
+                        frame->pdu.hdr.opcode == OamOpVendorOui ? "Vendor Specific" :
+                        frame->pdu.hdr.opcode == OamOpVarRequest ? "Attribute Request" :
+                        frame->pdu.hdr.opcode == OamOpVarResponse ? "Attribute Response" :
+                        frame->pdu.hdr.opcode == OamOpLookback ? "Loopback Control" : "Not support");
+
+    buflen = (buflen - usedlen) > 0 ? (buflen - usedlen) : 0;
+    switch( frame->pdu.hdr.opcode ){
+    case OamOpInfo:
+        oampdu_dump_info(frame, buf + usedlen, buflen);
+        break;
+    case OamOpEventNotification:
+        oampdu_dump_event(frame, buf + usedlen, buflen);
+        break;
+    case OamOpLookback:
+        oampdu_dump_loopback(frame, buf + usedlen, buflen);
+        break;
+    case OamOpVarRequest:
+        oampdu_dump_attr_request(frame, buf + usedlen, buflen);
+        break;
+    case OamOpVarResponse:
+        oampdu_dump_attr_response(frame, buf + usedlen, buflen);
+        break;
+    case OamOpVendorOui:
+        oampdu_dump_org(frame, buf + usedlen, buflen);
+        break;
+    default:
+        usedlen += snprintf(buf + usedlen, buflen, "Not Supported");
+        break;
+    }
 }

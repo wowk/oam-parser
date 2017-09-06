@@ -54,6 +54,30 @@ typedef struct {
 } __attribute__((packed)) oam_pdu_t;
 
 typedef struct {
+    uint8_t tlv_version;
+    uint16_t tlv_revision;
+    struct {
+        uint8_t parser_action:2;
+        uint8_t muxiplexer_action:1;
+        uint8_t reserved:5;
+    } __attribute__((packed)) dte_status;
+    struct {
+        uint8_t oam_mode:1;
+        uint8_t uni_dir_support:1;
+        uint8_t loopback_support:1;
+        uint8_t link_event_support:1;
+        uint8_t var_retrieval:1;
+        uint8_t _reserved:3;
+    } __attribute__((packed)) oam_conf;
+    uint16_t max_oampdu_size;
+    struct {
+        uint8_t high;
+        uint16_t low;
+    }oui;
+
+} __attribute__((packed)) oam_pdu_info_t;
+
+typedef struct {
     uint16_t sequence;
     STAILQ_HEAD(, tlv_elem_t) tlvs;
 } oam_pdu_event_t;
@@ -70,16 +94,16 @@ typedef struct leaf_t {
 
 typedef struct leaf_item_t {
     STAILQ_ENTRY(leaf_item_t) entry;
+    size_t leaflen;
     leaf_t leaf;
 }leaf_item_t;
 
 typedef struct {
-    uint8_t branch;
     uint16_t fw_ver;
     struct {
-        uint8_t part1;
-        uint16_t part2;
-    }oui;
+        uint8_t high;
+        uint16_t low;
+    } __attribute((packed)) oui;
     uint16_t product_id;
     uint16_t version;
     uint8_t extended_id[64];
@@ -136,5 +160,6 @@ typedef struct {
 
 extern oam_frame_t* oampdu_parse(oam_frame_t** frame, uint8_t* pkt, size_t len);
 extern void oampdu_free_frame(oam_frame_t** frame);
+extern void oampdu_dump(const oam_frame_t* frame, uint8_t* buf, size_t buflen);
 
 #endif // OAM_H
